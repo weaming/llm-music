@@ -1,0 +1,5 @@
+.env
+logs/
+tmp/
+llm-server/llm-server
+tap-player/tap-player
