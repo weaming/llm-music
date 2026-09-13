@@ -37,17 +37,9 @@ cp env.example .env
 
 填 `OPENAI_API_KEY`、`OPENAI_BASE_URL`、`OPENAI_MODEL` 三项即可，端口默认 3050 与 tap-player 的默认 tap 地址对齐。
 
-程序只读**进程环境**，不会自动加载 `.env`，跑之前先导出：
+`llm-server` 启动时读**当前目录**的 `.env`（在仓库根目录跑即可）。已存在的环境变量优先，所以临时改一项不必动文件：`LLM_SERVER_PORT=3051 llm-server`。
 
-```bash
-# bash/zsh
-set -a; source .env; set +a
-
-# fish
-export (grep -vE '^#|^\s*$' .env)
-```
-
-其余行为都有默认值，不写进 env，用 `tap-player` 的命令行参数调（`-h` 看全部）。
+`tap-player` 不读 `.env`，它的选项都有默认值，用命令行参数调（`-h` 看全部）。
 
 ## 三、运行
 

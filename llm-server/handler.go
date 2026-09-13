@@ -17,11 +17,11 @@ import (
 	"unicode"
 )
 
-var (
-	openAIKey   = os.Getenv("OPENAI_API_KEY")
-	openAIBase  = os.Getenv("OPENAI_BASE_URL")
-	openAIModel = os.Getenv("OPENAI_MODEL")
-)
+// 上游配置每次现读环境变量，不在启动时缓存：
+// .env 由 dotenv.go 的 init 载入，缓存会固定在载入之前读到空值。
+func openAIKey() string   { return strings.TrimSpace(os.Getenv("OPENAI_API_KEY")) }
+func openAIBase() string  { return strings.TrimSpace(os.Getenv("OPENAI_BASE_URL")) }
+func openAIModel() string { return strings.TrimSpace(os.Getenv("OPENAI_MODEL")) }
 
 // upstreamTimeout 限制单次上游 LLM 请求的总时长。
 // http.Server 的 WriteTimeout 必须不低于此值，
@@ -144,7 +144,7 @@ func handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	}
 	log.Printf("[LLM] caller=%s input_chars=%d user=%s", caller, len([]rune(req.SystemPrompt))+len([]rune(req.UserPrompt)), userMsg)
 
-	result, err := callLLM(openAIModel, req.SystemPrompt, req.UserPrompt)
+	result, err := callLLM(openAIModel(), req.SystemPrompt, req.UserPrompt)
 	if err != nil {
 		writeError(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -220,7 +220,7 @@ func handleOpenAIChatCompletions(w http.ResponseWriter, r *http.Request) {
 	model := probe.Model
 	if model == "" {
 		// 客户端没给 model 时才补默认值 —— 这是唯一一次改写请求体。
-		model = openAIModel
+		model = openAIModel()
 		if body, err = injectModel(body, model); err != nil {
 			writeError(w, fmt.Sprintf("注入默认 model 失败: %v", err), http.StatusBadRequest)
 			return
@@ -272,7 +272,7 @@ func injectModel(body []byte, model string) ([]byte, error) {
 // 透传路径刻意不做 model 改写(compatibleLLMReqParams 只服务 /v1/chat/simple):
 // 改写会让客户端收到与请求不符的 model,也破坏了"原样"。
 func forwardUpstream(ctx context.Context, body []byte) (*http.Response, error) {
-	if openAIKey == "" {
+	if openAIKey() == "" {
 		return nil, fmt.Errorf("OPENAI_API_KEY not set")
 	}
 
@@ -282,7 +282,7 @@ func forwardUpstream(ctx context.Context, body []byte) (*http.Response, error) {
 		return nil, err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+openAIKey)
+	req.Header.Set("Authorization", "Bearer "+openAIKey())
 
 	return upstreamClient.Do(req)
 }
@@ -404,7 +404,7 @@ func messageContent(raw json.RawMessage) string {
 
 // buildSimpleRequest 组装并发起上游请求,只服务 /v1/chat/simple(私有协议的扁平化单轮摘要)。
 func buildSimpleRequest(model, systemPrompt, userPrompt string) (*http.Response, error) {
-	if openAIKey == "" {
+	if openAIKey() == "" {
 		return nil, fmt.Errorf("OPENAI_API_KEY not set")
 	}
 
@@ -431,7 +431,7 @@ func buildSimpleRequest(model, systemPrompt, userPrompt string) (*http.Response,
 	}
 
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+openAIKey)
+	req.Header.Set("Authorization", "Bearer "+openAIKey())
 
 	return upstreamClient.Do(req)
 }
@@ -594,7 +594,7 @@ func estimateTokens(text string) int {
 }
 
 func currentOpenAIBaseURL() string {
-	apiBase := openAIBase
+	apiBase := openAIBase()
 	if apiBase == "" {
 		apiBase = "https://api.openai.com/v1"
 	}
@@ -607,15 +607,16 @@ func currentOpenAIBaseURL() string {
 }
 
 func currentOpenAIModel() string {
-	payload := map[string]any{"model": openAIModel}
-	compatibleLLMReqParams(payload, openAIModel)
+	model := openAIModel()
+	payload := map[string]any{"model": model}
+	compatibleLLMReqParams(payload, model)
 
-	model, ok := payload["model"].(string)
+	normalized, ok := payload["model"].(string)
 	if !ok {
-		return openAIModel
+		return model
 	}
 
-	return model
+	return normalized
 }
 
 func compatibleLLMReqParams(data map[string]any, model string) {

@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"sync/atomic"
 	"testing"
 )
@@ -244,9 +245,35 @@ func TestUpstreamProxyReadPerCall(t *testing.T) {
 	}
 }
 
-// setTestLLMEnv 覆盖包级 LLM 配置变量（启动时从环境变量初始化，测试内直接赋值），返回恢复函数。
+// setTestLLMEnv 临时覆盖上游 LLM 配置（这三项每次现读环境变量），返回恢复函数。
 func setTestLLMEnv(key, baseURL, model string) func() {
-	origKey, origBase, origModel := openAIKey, openAIBase, openAIModel
-	openAIKey, openAIBase, openAIModel = key, baseURL, model
-	return func() { openAIKey, openAIBase, openAIModel = origKey, origBase, origModel }
+	return swapEnv(map[string]string{
+		"OPENAI_API_KEY":  key,
+		"OPENAI_BASE_URL": baseURL,
+		"OPENAI_MODEL":    model,
+	})
+}
+
+// swapEnv 批量设置环境变量，返回把原值（含"原先不存在"）放回去的恢复函数。
+func swapEnv(values map[string]string) func() {
+	previous := make(map[string]*string, len(values))
+	for name, value := range values {
+		old, existed := os.LookupEnv(name)
+		if existed {
+			previous[name] = &old
+		} else {
+			previous[name] = nil
+		}
+		os.Setenv(name, value)
+	}
+
+	return func() {
+		for name, old := range previous {
+			if old == nil {
+				os.Unsetenv(name)
+				continue
+			}
+			os.Setenv(name, *old)
+		}
+	}
 }
