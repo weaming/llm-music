@@ -15,7 +15,7 @@ func main() {
 
 	addr := ":" + port
 	log.Printf("LLM Server 启动于 %s", addr)
-	log.Printf("LLM 配置: base_url=%s model=%s", currentOpenAIBaseURL(), currentOpenAIModel())
+	log.Printf("LLM 配置: base_url=%s model=%s", currentOpenAIBaseURL(), openAIModel())
 
 	srv := &http.Server{
 		Addr:         addr,

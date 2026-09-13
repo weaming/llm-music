@@ -77,12 +77,11 @@ tap-player replay -no-audio -out tmp/tap.wav tmp/tap.jsonl
 
 ## 端点
 
-| 端点 | 说明 |
-| --- | --- |
-| `POST /v1/chat/completions` | OpenAI 兼容透传，支持 `stream`；原样转发 body 与响应 |
-| `POST /v1/chat/simple` | 扁平单轮：`{system_prompt, user_prompt}` → `{content}` |
-| `GET /v1/tap` | SSE 旁路，事件 `stream_start` / `frame` / `stream_end` / `error` |
-| `GET /health` | 存活检查 |
+| 端点                        | 说明                                                             |
+| --------------------------- | ---------------------------------------------------------------- |
+| `POST /v1/chat/completions` | OpenAI 兼容透传，支持 `stream`；原样转发 body 与响应             |
+| `GET /v1/tap`               | SSE 旁路，事件 `stream_start` / `frame` / `stream_end` / `error` |
+| `GET /health`               | 存活检查                                                         |
 
 所有请求可带 `X-LLM-Caller` 头，用于用量日志区分调用方（默认 `unknown`）。
 
@@ -95,10 +94,3 @@ tap-player replay -no-audio -out tmp/tap.wav tmp/tap.jsonl
 - **和声**：全部音高取自大调五声音阶，任意取音都协和。
 - **混音**：鼓与旋律走两条混响总线（短反射 / 长混响），鼓点出现时侧链压低旋律。
 - **静默**：连续 8 拍没有输入就彻底安静，长时间挂着不会变成噪音。
-
-## 测试
-
-```bash
-cd llm-server && go test ./...
-cd tap-player && go test ./...
-```

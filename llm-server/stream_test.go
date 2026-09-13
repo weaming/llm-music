@@ -209,7 +209,7 @@ func TestHandleStreamingChatForwardsFrames(t *testing.T) {
 	}
 }
 
-// TestNormalizeCacheUsage 守住从 callLLM 抽出来的那段用量补齐逻辑。
+// TestNormalizeCacheUsage 守住用量字段的补齐逻辑。
 func TestNormalizeCacheUsage(t *testing.T) {
 	partial := tokenUsage{PromptTokens: 100}
 	partial.PromptTokenDetail.CachedTokens = 40

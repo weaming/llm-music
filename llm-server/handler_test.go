@@ -13,7 +13,7 @@ import (
 )
 
 func TestRequestCaller(t *testing.T) {
-	request := httptest.NewRequest(http.MethodPost, "/v1/chat/simple", nil)
+	request := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
 	if caller := requestCaller(request); caller != "unknown" {
 		t.Fatalf("caller = %q, want unknown", caller)
 	}

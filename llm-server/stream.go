@@ -184,7 +184,6 @@ func handleStreamingChat(w http.ResponseWriter, r *http.Request, relay chatRelay
 	})
 
 	logTokenUsage(relay.Caller, llmCallResult{
-		content:               text,
 		model:                 modelName,
 		usage:                 usage,
 		duration:              time.Since(startedAt),

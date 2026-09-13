@@ -74,16 +74,6 @@ type tokenUsage struct {
 	} `json:"prompt_tokens_details"`
 }
 
-type upstreamLLMResponse struct {
-	Model   string `json:"model"`
-	Choices []struct {
-		Message struct {
-			Content string `json:"content"`
-		} `json:"message"`
-	} `json:"choices"`
-	Usage tokenUsage `json:"usage"`
-}
-
 type usageLogEntry struct {
 	Timestamp            string `json:"timestamp"`
 	Caller               string `json:"caller"`
@@ -102,7 +92,6 @@ type usageLogEntry struct {
 
 func router() http.Handler {
 	mux := http.NewServeMux()
-	mux.HandleFunc("/v1/chat/simple", handleChatCompletions)
 	mux.HandleFunc("/v1/chat/completions", handleOpenAIChatCompletions)
 	mux.HandleFunc("/v1/tap", handleTap)
 	mux.HandleFunc("/health", handleHealth)
@@ -114,45 +103,9 @@ func handleHealth(w http.ResponseWriter, r *http.Request) {
 	w.Write([]byte("ok"))
 }
 
-func handleChatCompletions(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		writeError(w, "只支持 POST 请求", http.StatusMethodNotAllowed)
-		return
-	}
-
-	body, err := io.ReadAll(r.Body)
-	if err != nil {
-		writeError(w, fmt.Sprintf("读取请求失败: %v", err), http.StatusBadRequest)
-		return
-	}
-	defer r.Body.Close()
-
-	var req chatRequest
-	if err := json.Unmarshal(body, &req); err != nil {
-		writeError(w, fmt.Sprintf("解析 JSON 失败: %v", err), http.StatusBadRequest)
-		return
-	}
-
-	caller := requestCaller(r)
-	userMsg := req.UserPrompt
-	if len(userMsg) > 200 {
-		userMsg = userMsg[:200] + "..."
-	}
-	if strings.TrimSpace(req.UserPrompt) == "" {
-		writeError(w, "user_prompt 不能为空", http.StatusBadRequest)
-		return
-	}
-	log.Printf("[LLM] caller=%s input_chars=%d user=%s", caller, len([]rune(req.SystemPrompt))+len([]rune(req.UserPrompt)), userMsg)
-
-	result, err := callLLM(openAIModel(), req.SystemPrompt, req.UserPrompt)
-	if err != nil {
-		writeError(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-	logTokenUsage(caller, result)
-
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(chatResponse{Content: result.content})
+// chatResponse 是错误响应的信封。成功响应不自己构造 —— 透传路径原样回上游字节。
+type chatResponse struct {
+	Error string `json:"error"`
 }
 
 func writeError(w http.ResponseWriter, msg string, status int) {
@@ -162,7 +115,6 @@ func writeError(w http.ResponseWriter, msg string, status int) {
 }
 
 type llmCallResult struct {
-	content               string
 	model                 string
 	usage                 tokenUsage
 	duration              time.Duration
@@ -269,8 +221,7 @@ func injectModel(body []byte, model string) ([]byte, error) {
 }
 
 // forwardUpstream 把请求体原样转发给上游,只替换认证与内容类型。
-// 透传路径刻意不做 model 改写(compatibleLLMReqParams 只服务 /v1/chat/simple):
-// 改写会让客户端收到与请求不符的 model,也破坏了"原样"。
+// 刻意不做 model 改写:改写会让客户端收到与请求不符的 model,也破坏了"原样"。
 func forwardUpstream(ctx context.Context, body []byte) (*http.Response, error) {
 	if openAIKey() == "" {
 		return nil, fmt.Errorf("OPENAI_API_KEY not set")
@@ -364,7 +315,6 @@ func summarizeUpstream(relay chatRelay, respBody []byte, duration time.Duration)
 	usage := normalizeCacheUsage(raw.Usage)
 
 	return llmCallResult{
-		content:               text,
 		model:                 model,
 		usage:                 usage,
 		duration:              duration,
@@ -402,40 +352,6 @@ func messageContent(raw json.RawMessage) string {
 	return strings.Join(texts, "\n")
 }
 
-// buildSimpleRequest 组装并发起上游请求,只服务 /v1/chat/simple(私有协议的扁平化单轮摘要)。
-func buildSimpleRequest(model, systemPrompt, userPrompt string) (*http.Response, error) {
-	if openAIKey() == "" {
-		return nil, fmt.Errorf("OPENAI_API_KEY not set")
-	}
-
-	messages := []map[string]any{
-		{"role": "system", "content": systemPrompt},
-		{"role": "user", "content": userPrompt},
-	}
-
-	payload := map[string]any{
-		"model":    model,
-		"messages": messages,
-	}
-
-	compatibleLLMReqParams(payload, model)
-
-	jsonData, err := json.Marshal(payload)
-	if err != nil {
-		return nil, err
-	}
-
-	req, err := http.NewRequest("POST", currentOpenAIBaseURL()+"/chat/completions", bytes.NewBuffer(jsonData))
-	if err != nil {
-		return nil, err
-	}
-
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+openAIKey())
-
-	return upstreamClient.Do(req)
-}
-
 // normalizeCacheUsage 补齐 prompt cache 命中/未命中字段:上游可能只给
 // prompt_tokens_details.cached_tokens,而命中数缺失时未命中数也推不出来。
 func normalizeCacheUsage(usage tokenUsage) tokenUsage {
@@ -446,53 +362,6 @@ func normalizeCacheUsage(usage tokenUsage) tokenUsage {
 		usage.PromptCacheMiss = usage.PromptTokens - usage.PromptCacheHit
 	}
 	return usage
-}
-
-func callLLM(model, systemPrompt, userPrompt string) (llmCallResult, error) {
-	startedAt := time.Now()
-
-	resp, err := buildSimpleRequest(model, systemPrompt, userPrompt)
-	if err != nil {
-		return llmCallResult{}, err
-	}
-	defer resp.Body.Close()
-
-	respBody, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return llmCallResult{}, err
-	}
-
-	if resp.StatusCode != 200 {
-		return llmCallResult{}, fmt.Errorf("LLM API error: %s", string(respBody))
-	}
-
-	var result upstreamLLMResponse
-	if err := json.Unmarshal(respBody, &result); err != nil {
-		return llmCallResult{}, err
-	}
-
-	if len(result.Choices) == 0 {
-		return llmCallResult{}, fmt.Errorf("empty LLM response")
-	}
-
-	content := result.Choices[0].Message.Content
-	if content == "" {
-		return llmCallResult{}, fmt.Errorf("empty LLM content")
-	}
-
-	usage := normalizeCacheUsage(result.Usage)
-
-	return llmCallResult{
-		content:               content,
-		model:                 result.Model,
-		usage:                 usage,
-		duration:              time.Since(startedAt),
-		outputChars:           len([]rune(content)),
-		inputChars:            len([]rune(systemPrompt)) + len([]rune(userPrompt)),
-		estimatedInputTokens:  estimateTokens(systemPrompt + userPrompt),
-		estimatedOutputTokens: estimateTokens(content),
-		hasTokenUsage:         usage.TotalTokens > 0 || usage.PromptTokens > 0 || usage.CompletionTokens > 0,
-	}, nil
 }
 
 func requestCaller(r *http.Request) string {
@@ -604,28 +473,4 @@ func currentOpenAIBaseURL() string {
 	}
 
 	return apiBase
-}
-
-func currentOpenAIModel() string {
-	model := openAIModel()
-	payload := map[string]any{"model": model}
-	compatibleLLMReqParams(payload, model)
-
-	normalized, ok := payload["model"].(string)
-	if !ok {
-		return model
-	}
-
-	return normalized
-}
-
-func compatibleLLMReqParams(data map[string]any, model string) {
-	if strings.HasPrefix(strings.ToLower(model), "minimax") {
-		data["reasoning_split"] = true
-		if model, ok := data["model"].(string); ok {
-			if !strings.HasSuffix(strings.ToLower(model), "highspeed") {
-				data["model"] = model + "-highspeed"
-			}
-		}
-	}
 }
