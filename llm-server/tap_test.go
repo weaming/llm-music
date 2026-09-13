@@ -129,15 +129,10 @@ func TestTapReportsStreamingError(t *testing.T) {
 	}
 }
 
-// TestTapSilentForNonStreaming 非流式请求不产生任何旁路事件:
-// 它没有可音乐化的逐 token 过程,发事件只会让消费端收到无法处理的空壳。
-func TestTapSilentForNonStreaming(t *testing.T) {
-	// 必须用成功上游:原来 complete 是在 2xx 路径发的,用 429 测不出它是否真被删掉
-	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		io.WriteString(w, `{"model":"m","choices":[{"message":{"role":"assistant","content":"ok"}}]}`)
-	}))
-	defer upstream.Close()
+// TestTapDeliversEventsForBlockingCall 非流式请求同样产生旁路事件:
+// llm-server 内部把它转发成流式,旁路才拿得到逐 token 的过程。
+func TestTapDeliversEventsForBlockingCall(t *testing.T) {
+	upstream := newSSEUpstream(t, `{"model":"m","choices":[{"delta":{"content":"hi"}}]}`)
 
 	restoreEnv := setTestLLMEnv("test-key", upstream.URL, "test-model")
 	defer restoreEnv()
@@ -161,9 +156,15 @@ func TestTapSilentForNonStreaming(t *testing.T) {
 		resp.Body.Close()
 	}()
 
-	// 给足时间让请求走完;此时若有任何事件都说明非流式仍在发旁路
-	if events := collectTapEvents(tapResp.Body, 1500*time.Millisecond, tapKindError); len(events) != 0 {
-		t.Fatalf("非流式请求不该产生旁路事件，收到 %v", events)
+	events := collectTapEvents(tapResp.Body, 5*time.Second)
+	kinds := make(map[string]int, len(events))
+	for _, rec := range events {
+		kinds[rec.Kind]++
+	}
+	for _, want := range []string{tapKindStreamStart, tapKindFrame, tapKindStreamEnd} {
+		if kinds[want] == 0 {
+			t.Fatalf("非流式请求缺少 %q 事件,收到 %v", want, events)
+		}
 	}
 }
 

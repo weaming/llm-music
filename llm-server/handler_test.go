@@ -45,13 +45,15 @@ func TestMessageContent(t *testing.T) {
 	}
 }
 
-// TestOpenAIRequestForwardedVerbatim 是透传改造的核心断言:
+// TestOpenAIRequestForwardedVerbatim 是透传改造的核心断言(流式路径):
 // 客户端发出的 body 必须**逐字节**到达上游 —— tools 的顺序、未知字段、
 // 多轮 messages(含 assistant.tool_calls 与 role:"tool" 的 tool_call_id)都不能被改动。
 // 这些都是旧实现会静默丢弃或压平的内容。
+// 非流式请求走的是另一条路(内部转成流式),那是有意改写,见 TestBlockingRequestRewrittenToStream。
 func TestOpenAIRequestForwardedVerbatim(t *testing.T) {
 	// 照抄 xbot 真实发出的形状:xbot 侧 tools 顺序是契约的一部分且无工具时发 []。
 	const clientBody = `{"model":"deepseek-v4-flash",` +
+		`"stream":true,` +
 		`"messages":[` +
 		`{"role":"system","content":"sys"},` +
 		`{"role":"user","content":"hi"},` +
@@ -88,8 +90,9 @@ func TestOpenAIRequestForwardedVerbatim(t *testing.T) {
 	}
 }
 
-// TestOpenAIResponseRelayedVerbatim 上游响应必须原样回传:
+// TestOpenAIResponseRelayedVerbatim 上游若没按 SSE 回(忽略了 stream),响应必须原样回传:
 // 旧实现从零重建响应,把 finish_reason 硬编码成 "stop"、丢掉 tool_calls 与上游 id。
+// 这同时守住阻塞路径的兜底:合成响应只在真拿到 SSE 帧时才做,免得把非 SSE 上游变成空回复。
 func TestOpenAIResponseRelayedVerbatim(t *testing.T) {
 	const upstreamBody = `{"id":"upstream-id-123","object":"chat.completion","created":1,` +
 		`"model":"m","system_fingerprint":"fp_x",` +

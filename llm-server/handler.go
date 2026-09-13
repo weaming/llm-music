@@ -72,6 +72,9 @@ type tokenUsage struct {
 	PromptTokenDetail struct {
 		CachedTokens int `json:"cached_tokens"`
 	} `json:"prompt_tokens_details"`
+	CompletionTokenDetail struct {
+		ReasoningTokens int `json:"reasoning_tokens"`
+	} `json:"completion_tokens_details"`
 }
 
 type usageLogEntry struct {
@@ -148,8 +151,12 @@ type chatProbe struct {
 	InputText string
 }
 
-// handleOpenAIChatCompletions 透传 OpenAI Chat Completions 请求。
+// handleOpenAIChatCompletions 处理 OpenAI Chat Completions 请求。
 // body 中的 model 缺省时回退环境变量 OPENAI_MODEL(此时会重新编码请求体)。
+//
+// 客户端要求流式就逐帧透传,否则在**内部**转发成流式再合成非流式响应
+// (见 handleBlockingChat):两条路径下调用者的观感都与直连上游无异,
+// 而旁路始终能拿到逐 token 的过程。
 func handleOpenAIChatCompletions(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		writeError(w, "只支持 POST 请求", http.StatusMethodNotAllowed)
@@ -220,6 +227,26 @@ func injectModel(body []byte, model string) ([]byte, error) {
 	return json.Marshal(payload)
 }
 
+// enableUpstreamStream 把客户端的非流式请求改写成流式,并要求上游带上 usage。
+// 这是阻塞路径唯一一次改写请求体。
+func enableUpstreamStream(body []byte) ([]byte, error) {
+	var payload map[string]any
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return nil, err
+	}
+
+	payload["stream"] = true
+	options, _ := payload["stream_options"].(map[string]any)
+	if options == nil {
+		options = map[string]any{}
+	}
+	// usage 只在最后那一帧给,没有它就只能靠字符数估算用量
+	options["include_usage"] = true
+	payload["stream_options"] = options
+
+	return json.Marshal(payload)
+}
+
 // forwardUpstream 把请求体原样转发给上游,只替换认证与内容类型。
 // 刻意不做 model 改写:改写会让客户端收到与请求不符的 model,也破坏了"原样"。
 func forwardUpstream(ctx context.Context, body []byte) (*http.Response, error) {
@@ -238,44 +265,23 @@ func forwardUpstream(ctx context.Context, body []byte) (*http.Response, error) {
 	return upstreamClient.Do(req)
 }
 
-// handleBlockingChat 非流式透传:上游响应原样回传,并记用量。
-//
-// 刻意**不发旁路事件**:tap 只服务逐 token 的流式场景,
-// 非流式请求没有可音乐化的过程,发事件只会让消费端收到无法处理的空壳。
-func handleBlockingChat(w http.ResponseWriter, r *http.Request, relay chatRelay) {
-	startedAt := time.Now()
-
-	resp, err := forwardUpstream(r.Context(), relay.Body)
-	if err != nil {
-		writeError(w, err.Error(), http.StatusBadGateway)
-		return
-	}
-	defer resp.Body.Close()
-
-	respBody, err := io.ReadAll(resp.Body)
-	if err != nil {
-		writeError(w, fmt.Sprintf("读取上游响应失败: %v", err), http.StatusBadGateway)
-		return
-	}
-
-	relayUpstream(w, resp, respBody)
-
-	result := summarizeUpstream(relay, respBody, time.Since(startedAt))
-	logTokenUsage(relay.Caller, result)
-}
-
 // relayUpstream 把上游响应原样回传:保留状态码、复制响应头、写出原始 body。
 // 错误响应同样原样回传 —— 客户端依赖上游的状态码(429/401…)与错误信封做退避决策。
 func relayUpstream(w http.ResponseWriter, resp *http.Response, body []byte) {
-	for k, v := range resp.Header {
-		if isHopByHopHeader(k) {
-			continue
-		}
-		w.Header()[k] = v
-	}
+	copyUpstreamHeaders(w.Header(), resp.Header)
 	w.WriteHeader(resp.StatusCode)
 	if _, err := w.Write(body); err != nil {
 		log.Printf("[LLM] 回传上游响应失败: %v", err)
+	}
+}
+
+// copyUpstreamHeaders 复制上游响应头,跳过逐跳头。
+func copyUpstreamHeaders(dst, src http.Header) {
+	for name, values := range src {
+		if isHopByHopHeader(name) {
+			continue
+		}
+		dst[name] = values
 	}
 }
 
@@ -311,16 +317,21 @@ func summarizeUpstream(relay chatRelay, respBody []byte, duration time.Duration)
 	for _, choice := range raw.Choices {
 		content.WriteString(messageContent(choice.Message.Content))
 	}
-	text := content.String()
-	usage := normalizeCacheUsage(raw.Usage)
 
+	return newCallResult(model, content.String(), relay.InputText, normalizeCacheUsage(raw.Usage), duration)
+}
+
+// newCallResult 汇总一次调用的用量口径。
+// 流式透传、阻塞内转流式、非 SSE 兜底三条路径都走它 —— 口径必须一致,
+// 否则同一个调用会因为客户端要不要流式而得到不同的用量日志。
+func newCallResult(model, text, inputText string, usage tokenUsage, duration time.Duration) llmCallResult {
 	return llmCallResult{
 		model:                 model,
 		usage:                 usage,
 		duration:              duration,
 		outputChars:           len([]rune(text)),
-		inputChars:            len([]rune(relay.InputText)),
-		estimatedInputTokens:  estimateTokens(relay.InputText),
+		inputChars:            len([]rune(inputText)),
+		estimatedInputTokens:  estimateTokens(inputText),
 		estimatedOutputTokens: estimateTokens(text),
 		hasTokenUsage:         tapUsageFrom(usage) != nil,
 	}
